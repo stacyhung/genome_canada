@@ -1,0 +1,309 @@
+---
+title: "SNV Heatmap"
+author: "Stacy Hung"
+date: "February 22, 2017"
+output: html_notebook
+---
+
+This script generates a detailed table/matrix (derived from SNV mutation heatmap) that summarizes
+the number and type of mutations for all sequenced GPH cases.
+
+Case information can also be added (e.g. DNA_ID, pathology, experimental ID, and average coverage).
+
+# Overview of workflow
+
+1) Open entire workbook for GPH Targeted Sequencing (all worksheets) - save into dataframe(s)
+2) Alter dataframe corresponding to main worksheet
+3) Use altered dataframe with other unaltered dataframes to create new excel file
+ 
+# psuedo code:
+
+1. load mutation data - filter for "pass" cases (>50x, use data = yes)
+2. apply any necessary filters to the mutations (e.g. ensure 10/10 cutoff, REPORT=yes, no strand bias)
+3. categorize mutations into 1 of 5 categories (in-frame indel)
+
+## Load datasets
+```{r}
+library(xlsx)	
+# Read in the GPH Targeted Sequencing table
+gph_ts_file <- "/Volumes/BCCA/docs/lymphoma/GPH/other_files/TARGETED_SEQ/GPH_TARGETED_SEQUENCING.xls"	
+ts_wb <- loadWorkbook(gph_ts_file)
+ts_data <- read.xlsx(gph_ts_file, 1)  # read the first sheet	
+	
+# Read in the SNV master file
+snvs_master_file <- "/Volumes/BCCA/docs/lymphoma/GPH/other_files/TARGETED_SEQ/GPH_Calls_MASTER.xls"
+snvs <- read.xlsx(snvs_master_file, 1) # read the first sheet
+```
+
+## Filter datasets
+```{r}
+# filters for mutation table
+snvs.pass <- snvs[ which ( snvs$report == 'YES') , ]
+# for added robustness, filter out samples that have < 50X (REPORT=yes and use case=yes is not always consistent)
+snvs.pass <- snvs.pass[ which ( snvs.pass$avg_cov_tumor > 50) , ]
+
+# filters for GPH table
+# remove columns that are not required for matrix generation:
+ts_data <- ts_data[,c(1:3, 11:15)]
+# filter for tumor cases
+ts_data.tumor <- ts_data[ which( ts_data$PATH == 'CLL' | ts_data$PATH == 'DLBCL' | ts_data$PATH == 'FL') , ]
+# filter for use case = yes (should automatically filter for > 50x coverage)
+ts_data.tumor.pass <- subset(ts_data.tumor, ts_data.tumor$use.data == 'yes')
+ts_data.tumor.pass <- droplevels(ts_data.tumor.pass)
+
+# for EXTRA robustness, only include mutations for which use data = yes
+snvs.pass <- snvs.pass[ snvs.pass$case_id %in% ts_data.tumor.pass$CASE_ID, ]
+snvs.pass <- droplevels(snvs.pass)
+```
+
+## build keys and hash table
+```{r}
+row.names(ts_data.tumor.pass) <- ts_data.tumor.pass$CASE_ID
+
+# build the hash table so that keys are case IDs
+gph.list.v2 <- list()
+for (i in 1:nrow(ts_data.tumor.pass)) {
+  currKey <- as.character(ts_data.tumor.pass[i, "CASE_ID"])
+  gph.list.v2[[currKey]] <- ts_data.tumor.pass [i, c("DNA_ID", "PATH", "EXPERIMENT_ID", "Average.Coverage")]
+}
+```
+
+## Matrix generation
+```{r}
+library(plyr)
+
+# get the counts of mutations per sample and gene - these counts are for ALL mutations
+snv_table <- table(snvs.pass$case_id, snvs.pass$gene)
+
+# plot counts of mutations, with stacking according to mutation type / effect
+# we want to summarize mutations into three possible categories:
+#   (1) missense [SNV]
+#   (2) nonsense [SNV]
+#   (3) splice site / start gained (no functional class) [SNV]
+#   (4) indel (various effects)
+
+# Recent changes:
+# 2017-03-01: created a new category "Start lost" that just encompasses the START_LOST effect
+#             - discarded any mapping for the "START_GAINED" effect, since this should be filtered out already 
+
+# to determine what category each mutation belongs to, we can map the effect using revalue()
+snvs.pass$class <- revalue(snvs.pass$effect_snpEff_4.0, c(
+                           "NON_SYNONYMOUS_CODING"="Missense", 
+                           "NON_SYNONYMOUS_START"="Missense",
+                           "START_LOST"="Start Lost",
+                           "STOP_LOST"="Missense",
+                           "STOP_GAINED"="Nonsense",
+                           "CODON_CHANGE_PLUS_CODON_DELETION"="In-frame Indel",
+                           "CODON_CHANGE_PLUS_CODON_INSERTION"="In-frame Indel",
+                           "CODON_DELETION"="In-frame Indel",
+                           "CODON_INSERTION"="In-frame Indel",
+                           "FRAME_SHIFT"="Frameshift Indel",
+                           "FRAME_SHIFT+SPLICE_SITE_ACCEPTOR"="Frameshift Indel",
+                           "FRAME_SHIFT+SPLICE_SITE_DONOR"="Frameshift Indel",
+                           "FRAME_SHIFT+STOP_GAINED"="Frameshift Indel",
+                           "SPLICE_SITE_ACCEPTOR+CODON_CHANGE_PLUS_CODON_DELETION"="In-frame Indel",
+                           "SPLICE_SITE_DONOR+CODON_CHANGE_PLUS_CODON_DELETION"="In-frame Indel",
+                           "STOP_LOST+CODON_DELETION"="In-frame Indel",
+                           "SPLICE_SITE_ACCEPTOR"="Splice site",
+                           "SPLICE_SITE_DONOR"="Splice site"))
+
+# get heatmap data in the context of each type of mutation
+snvs.pass.fsindel <- subset(snvs.pass, snvs.pass$class == "Frameshift Indel")
+snvs.pass.ifindel <- subset(snvs.pass, snvs.pass$class == "In-frame Indel")
+snvs.pass.missense <- subset(snvs.pass, snvs.pass$class == "Missense")
+snvs.pass.nonsense <- subset(snvs.pass, snvs.pass$class == "Nonsense")
+snvs.pass.splice <- subset(snvs.pass, snvs.pass$class == "Splice site")
+snvs.pass.startlost <- subset(snvs.pass, snvs.pass$class == "Start Lost")
+
+snv_table.fsindel <- table(snvs.pass.fsindel$case_id, snvs.pass.fsindel$gene)
+snv_table.ifindel <- table(snvs.pass.ifindel$case_id, snvs.pass.ifindel$gene)
+snv_table.missense <- table(snvs.pass.missense$case_id, snvs.pass.missense$gene)
+snv_table.nonsense <- table(snvs.pass.nonsense$case_id, snvs.pass.nonsense$gene)
+snv_table.splice <- table(snvs.pass.splice$case_id, snvs.pass.splice$gene)
+snv_table.startlost <- table(snvs.pass.startlost$case_id, snvs.pass.startlost$gene)
+
+# combine the tables into one (dimensions of all count tables is the same, but use just one for reference)
+snv_table.all <- data.frame(matrix(ncol = ncol(snv_table), nrow = nrow(snv_table)))
+colnames(snv_table.all) <- colnames(snv_table)
+row.names(snv_table.all) <- row.names(snv_table)
+
+for (i in 1:length(snv_table.all)) {
+  # paste as list, values for each mutation type
+  snv_table.all[,i] <- paste(snv_table.fsindel[,i],
+                             snv_table.ifindel[,i], 
+                             snv_table.missense[,i], 
+                             snv_table.nonsense[,i], 
+                             snv_table.splice[,i],
+                             snv_table.startlost[,i],
+                             sep = ",")
+}
+
+# change the ordering of the columns to be based on assay version, then alpha:
+# Important: until we start seeing mutations in PTPN1, this is the list of genes we will be using:
+ordered.cols <- c("CARD11", "CCND3", "CD79B", "CREBBP", "EP300", "EZH2", "FOXO1", "GNA13", "ID3", "KLHL6", "MEF2B", "MYD88", "NOTCH1", "NOTCH2", "SF3B1", "SGK1", "TCF3", "TNFRSF14", "TP53", "ARID1A", "B2M", "BIRC3", "BTG1", "PIM1", "STAT6", "TMEM30A", "ATM", "CHD2", "KMT2D", "POT1", "XPO1", "BCL2", "BTK", "CD58", "CIITA", "DDX3X", "MYC", "PRDM1", "RRAGC", "SOCS1", "TNFAIP3", "XBP1")
+#ordered.cols <- c("CARD11", "CCND3", "CD79B", "CREBBP", "EP300", "EZH2", "FOXO1", "GNA13", "ID3", "KLHL6", "MEF2B", "MYD88", "NOTCH1", "NOTCH2", "PTPN1", "SF3B1", "SGK1", "TCF3", "TNFRSF14", "TP53", "ARID1A", "B2M", "BIRC3", "BTG1", "PIM1", "STAT6", "TMEM30A", "ATM", "CHD2", "KMT2D", "POT1", "XPO1", "BCL2", "BTK", "CD58", "CIITA", "DDX3X", "MYC", "PRDM1", "RRAGC", "SOCS1", "TNFAIP3", "XBP1")
+
+snv_table.all.df <- as.data.frame.matrix(snv_table.all)
+snv_table.all.ordered <- snv_table.all.df[, ordered.cols]
+
+snv_table.final <- data.frame(matrix(ncol = ncol(snv_table) + 4, nrow = 0))
+col.final <- c( c("DNA_ID", "PATH", "EXPERIMENT_ID", "Average.Coverage"), ordered.cols)
+colnames(snv_table.final) <- col.final
+
+# use hash table of GPH data to add columns of meta data for DNA_ID, PATH, EXPERIMENT_ID, and AVG_COV
+for (i in 1:length(row.names(snv_table.all.ordered))) {
+  # paste as list, values for each mutation type
+  currKey <- row.names(snv_table.all.ordered)[i]
+  snv_table.final <- rbind(snv_table.final, cbind(gph.list.v2[[currKey]], snv_table.all.ordered[currKey, ]))
+}
+
+# can we also place "-" or NA's in entries for which the patient was not sequenced for a gene?
+
+# set working directory- will create it if it does not exist
+currDate <- strsplit(toString(Sys.time()), " ")[[1]][[1]]
+dir <- "~/Documents/projects/GenomeCanada/mutation_summaries/"
+dir <- paste(dir, currDate, sep = "")
+dir.create(dir)
+setwd(dir)
+
+# write the table for viewing in another program (e.g. Excel); NB: col.names = NA enables column names to be aligned to the correct column data
+write.table(snv_table.final, 
+            "snv_table.final.txt", 
+            sep = "\t", 
+            row.names = TRUE, 
+            quote = FALSE,
+            col.names = NA)
+
+# create new excel file, which is an updated version of the previous GPH targeted sequencing table
+writeData(ts_wb, sheet = "Data", newData, colNames = T)
+saveWorkbook(wb,"GPH_TARGETED_SEQUENCING.new.xls",overwrite = F)
+```
+
+## Look at specific experiments (e.g. if you only want to update recent experiments)
+```{r}
+latest.snv_table.final <- snv_table.final[(snv_table.final$EXPERIMENT_ID %in% 
+                                             c("GPH30pool1", "GPH30pool2",
+                                               "GPH30pool1_GPH26pool1", 
+                                               "GPH31pool1", "GPH31pool2",
+                                               "GPH31pool2_GPH32pool1",
+                                               "GPH32pool1", "GPH32pool2",
+                                               "GPH33pool1", "GPH33pool2",
+                                               "GPH34pool1", "GPH34pool2")),]
+
+write.table(latest.snv_table.final, 
+            "latest.snv_table.final.txt", 
+            sep = "\t", 
+            row.names = TRUE, 
+            quote = FALSE,
+            col.names = NA)
+
+```
+
+
+## PREVIOUS CODE ##
+
+
+## Matrix generation
+
+Note that when plotting the EFFECT column alone, there are 15 different possible values. Ideally, we could narrow this down to a smaller number - e.g. missense, nonsense, splice site, and indel.  Can we integrate information from the TYPE, EFFECT, and FUNCLASS columns to create this information?
+
+```{r}
+library(plyr)
+
+# get the counts of mutations per sample and gene - these counts are for ALL mutations
+snv_table <- table(snvs.pass$Case.ID, snvs.pass$EFF....GENE)
+
+# plot counts of mutations, with stacking according to mutation type / effect
+# we want to summarize mutations into three possible categories:
+#   (1) missense [SNV]
+#   (2) nonsense [SNV]
+#   (3) splice site / start gained (no functional class) [SNV]
+#   (4) indel (various effects)
+
+# Recent changes:
+# 2017-03-01: created a new category "Start lost" that just encompasses the START_LOST effect
+#             - discarded any mapping for the "START_GAINED" effect, since this should be filtered out already 
+
+# to determine what category each mutation belongs to, we can map the effect using revalue()
+snvs.pass$CLASS <- revalue(snvs.pass$SnpEff.4.2EFFECT, c("NON_SYNONYMOUS_CODING"="Missense", 
+                           "NON_SYNONYMOUS_START"="Missense",
+                           "START_LOST"="Start Lost",
+                           "STOP_LOST"="Missense",
+                           "STOP_GAINED"="Nonsense",
+                           "CODON_CHANGE_PLUS_CODON_DELETION"="In-frame Indel",
+                           "CODON_DELETION"="In-frame Indel",
+                           "CODON_INSERTION"="In-frame Indel",
+                           "FRAME_SHIFT"="Frameshift Indel",
+                           "FRAME_SHIFT+SPLICE_SITE_ACCEPTOR"="Frameshift Indel",
+                           "FRAME_SHIFT+SPLICE_SITE_DONOR"="Frameshift Indel",
+                           "FRAME_SHIFT+STOP_GAINED"="Frameshift Indel",
+                           "SPLICE_SITE_ACCEPTOR+CODON_CHANGE_PLUS_CODON_DELETION"="In-frame Indel",
+                           "SPLICE_SITE_DONOR+CODON_CHANGE_PLUS_CODON_DELETION"="In-frame Indel",
+                           "STOP_LOST+CODON_DELETION"="In-frame Indel",
+                           "SPLICE_SITE_ACCEPTOR"="Splice site",
+                           "SPLICE_SITE_DONOR"="Splice site"))
+
+# get heatmap data in the context of each type of mutation
+snvs.pass.fsindel <- subset(snvs.pass, snvs.pass$CLASS == "Frameshift Indel")
+snvs.pass.ifindel <- subset(snvs.pass, snvs.pass$CLASS == "In-frame Indel")
+snvs.pass.missense <- subset(snvs.pass, snvs.pass$CLASS == "Missense")
+snvs.pass.nonsense <- subset(snvs.pass, snvs.pass$CLASS == "Nonsense")
+snvs.pass.splice <- subset(snvs.pass, snvs.pass$CLASS == "Splice site")
+snvs.pass.startlost <- subset(snvs.pass, snvs.pass$CLASS == "Start Lost")
+
+snv_table.fsindel <- table(snvs.pass.fsindel$Case.ID, snvs.pass.fsindel$EFF....GENE)
+snv_table.ifindel <- table(snvs.pass.ifindel$Case.ID, snvs.pass.ifindel$EFF....GENE)
+snv_table.missense <- table(snvs.pass.missense$Case.ID, snvs.pass.missense$EFF....GENE)
+snv_table.nonsense <- table(snvs.pass.nonsense$Case.ID, snvs.pass.nonsense$EFF....GENE)
+snv_table.splice <- table(snvs.pass.splice$Case.ID, snvs.pass.splice$EFF....GENE)
+snv_table.startlost <- table(snvs.pass.startlost$Case.ID, snvs.pass.startlost$EFF....GENE)
+
+# combine the tables into one:
+snv_table.all <- data.frame(matrix(ncol = 41, nrow = 297))
+colnames(snv_table.all) <- colnames(snv_table)
+row.names(snv_table.all) <- row.names(snv_table)
+
+for (i in 1:length(snv_table.all)) {
+  # paste as list, values for each mutation type
+  snv_table.all[,i] <- paste(snv_table.fsindel[,i],
+                             snv_table.ifindel[,i], 
+                             snv_table.missense[,i], 
+                             snv_table.nonsense[,i], 
+                             snv_table.splice[,i],
+                             snv_table.startlost[,i],
+                             sep = ",")
+}
+
+# change the ordering of the columns to be based on assay version, then alpha:
+ordered.cols <- c("CARD11", "CCND3", "CD79B", "CREBBP", "EP300", "EZH2", "FOXO1", "GNA13", "ID3", "KLHL6", "MEF2B", "MYD88", "NOTCH1", "NOTCH2", "SF3B1", "SGK1", "TCF3", "TNFRSF14", "TP53", "ARID1A", "B2M", "BIRC3", "BTG1", "PIM1", "STAT6", "TMEM30A", "ATM", "CHD2", "KMT2D", "POT1", "XPO1", "BCL2", "BTK", "CD58", "CIITA", "MYC", "PRDM1", "RRAGC", "SOCS1", "TNFAIP3", "XBP1")
+
+snv_table.all.df <- as.data.frame.matrix(snv_table.all)
+snv_table.all.ordered <- snv_table.all.df[, ordered.cols]
+
+snv_table.final <- data.frame(matrix(ncol = 45, nrow = 0))
+col.final <- c( c("DNA_ID", "PATH", "EXPERIMENT_ID", "Average.Coverage"), ordered.cols)
+colnames(snv_table.final) <- col.final
+
+# use hash table of GPH data to add columns of meta data for DNA_ID, PATH, EXPERIMENT_ID, and AVG_COV
+for (i in 1:length(row.names(snv_table.all.ordered))) {
+  # paste as list, values for each mutation type
+  currKey <- row.names(snv_table.all.ordered)[i]
+  snv_table.final <- rbind(snv_table.final, cbind(gph.list.v2[[currKey]], snv_table.all.ordered[currKey, ]))
+}
+
+# can we also place "-" or NA's in entries for which the patient was not sequenced for a gene?
+
+# write the table for viewing in another program (e.g. Excel); NB: col.names = NA enables column names to be aligned to the correct column data
+write.table(snv_table.final, 
+            "snv_table.final.txt", 
+            sep = "\t", 
+            row.names = TRUE, 
+            quote = FALSE,
+            col.names = NA)
+
+# create new excel file, which is an updated version of the previous GPH targeted sequencing table
+writeData(ts_wb, sheet = "Data", newData, colNames = T)
+saveWorkbook(wb,"GPH_TARGETED_SEQUENCING.new.xls",overwrite = F)
+```
+
+
